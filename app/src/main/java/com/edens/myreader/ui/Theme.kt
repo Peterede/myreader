@@ -1,4 +1,4 @@
-package com.myreader.app.ui
+package com.edens.myreader.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme

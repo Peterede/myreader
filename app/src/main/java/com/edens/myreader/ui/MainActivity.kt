@@ -1,4 +1,4 @@
-package com.myreader.app.ui
+package com.edens.myreader.ui
 
 import android.Manifest
 import android.os.Build
@@ -14,7 +14,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
-import com.myreader.app.MyReaderApp
+import com.edens.myreader.MyReaderApp
 
 class MainActivity : ComponentActivity() {
 

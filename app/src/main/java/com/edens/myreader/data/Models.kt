@@ -1,4 +1,4 @@
-package com.myreader.app.data
+package com.edens.myreader.data
 
 import kotlinx.serialization.Serializable
 
@@ -17,10 +17,9 @@ data class BookMeta(
     /** Rough 0..1 reading progress estimate. */
     val progress: Float
         get() {
-            val perChapter = if (sentenceCount > 0) sentenceIndex.toFloat() / sentenceCount else 0f
-            val total = chapterCount + perChapter
-            val max = chapterCount + 1f
-            return (total / max).coerceIn(0f, 1f)
+        val perChapter = if (sentenceCount > 0) sentenceIndex.toFloat() / sentenceCount else 0f
+        val total = chapterIndex + perChapter
+        return (total / chapterCount.coerceAtLeast(1)).coerceIn(0f, 1f)
         }
 }
 

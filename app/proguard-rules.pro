@@ -1,8 +1,8 @@
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.**
--keepclassmembers class com.myreader.app.** {
+-keepclassmembers class com.edens.myreader.** {
     *** Companion;
 }
--keepclasseswithmembers class com.myreader.app.** {
+-keepclasseswithmembers class com.edens.myreader.** {
     kotlinx.serialization.KSerializer serializer(...);
 }

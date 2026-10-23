@@ -1,4 +1,4 @@
-package com.myreader.app.service
+package com.edens.myreader.service
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -11,9 +11,9 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import com.myreader.app.MyReaderApp
-import com.myreader.app.R
-import com.myreader.app.ui.MainActivity
+import com.edens.myreader.MyReaderApp
+import com.edens.myreader.R
+import com.edens.myreader.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -93,7 +93,7 @@ class PlayerService : Service() {
         }
     }
 
-    private fun updateNotification(st: com.myreader.app.tts.Player.PlayerState) {
+    private fun updateNotification(st: com.edens.myreader.tts.Player.PlayerState) {
         val chapter = st.chapterTitles.getOrNull(st.chapterIndex).orEmpty()
         val text = buildString {
             if (chapter.isNotEmpty()) append(chapter)
@@ -158,10 +158,10 @@ class PlayerService : Service() {
     companion object {
         private const val CHANNEL_ID = "reading"
         private const val NOTIFICATION_ID = 10
-        const val ACTION_PLAY_PAUSE = "com.myreader.app.action.PLAY_PAUSE"
-        const val ACTION_NEXT = "com.myreader.app.action.NEXT"
-        const val ACTION_PREV = "com.myreader.app.action.PREV"
-        const val ACTION_STOP = "com.myreader.app.action.STOP"
+        const val ACTION_PLAY_PAUSE = "com.edens.myreader.action.PLAY_PAUSE"
+        const val ACTION_NEXT = "com.edens.myreader.action.NEXT"
+        const val ACTION_PREV = "com.edens.myreader.action.PREV"
+        const val ACTION_STOP = "com.edens.myreader.action.STOP"
 
         fun start(context: Context) {
             val intent = Intent(context, PlayerService::class.java)

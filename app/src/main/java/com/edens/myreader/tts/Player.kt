@@ -1,4 +1,4 @@
-package com.myreader.app.tts
+package com.edens.myreader.tts
 
 import android.content.Context
 import android.media.AudioAttributes
@@ -9,8 +9,8 @@ import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
-import com.myreader.app.data.Book
-import com.myreader.app.data.BookStore
+import com.edens.myreader.data.Book
+import com.edens.myreader.data.BookStore
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -126,12 +126,17 @@ class Player(context: Context, private val store: BookStore) {
         mainHandler.post { speakCurrent() }
     }
 
-    fun pause() {
+    fun pause() = pauseInternal(abandonFocus = true)
+
+    private fun pauseInternal(abandonFocus: Boolean) {
+        if (abandonFocus) {
+            resumeOnFocusGain = false
+            abandonAudioFocus()
+        }
         if (!_state.value.isPlaying) return
         currentUtterance = null
         tts?.stop()
         _state.update { it.copy(isPlaying = false) }
-        abandonAudioFocus()
         persist()
     }
 
@@ -243,6 +248,7 @@ class Player(context: Context, private val store: BookStore) {
 
     fun endOfBook() {
         currentUtterance = null
+        resumeOnFocusGain = false
         tts?.stop()
         _state.update { st ->
             st.copy(
@@ -524,12 +530,36 @@ class Player(context: Context, private val store: BookStore) {
 
     // -------------------------------------------------------------- audio focus
 
+    /**
+     * Set when playback was paused by a short interruption (a notification
+     * sound, a call ringing, ...) and narration should continue once that
+     * interruption releases audio focus.
+     */
+    private var resumeOnFocusGain = false
+
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
-            AudioManager.AUDIOFOCUS_LOSS,
+            AudioManager.AUDIOFOCUS_GAIN -> mainHandler.post {
+                if (resumeOnFocusGain) {
+                    resumeOnFocusGain = false
+                    play()
+                }
+            }
+
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK,
-            -> mainHandler.post { pause() }
+            -> mainHandler.post {
+                // Pause for the interruption, but keep the focus request alive
+                // so the system reports AUDIOFOCUS_GAIN when it ends.
+                resumeOnFocusGain = _state.value.isPlaying
+                pauseInternal(abandonFocus = false)
+            }
+
+            // Another app took over playback for good: stay paused.
+            AudioManager.AUDIOFOCUS_LOSS -> mainHandler.post {
+                resumeOnFocusGain = false
+                pause()
+            }
         }
     }
 

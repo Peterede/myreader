@@ -1,4 +1,4 @@
-package com.myreader.app.data
+package com.edens.myreader.data
 
 import android.util.Xml
 import org.xmlpull.v1.XmlPullParser

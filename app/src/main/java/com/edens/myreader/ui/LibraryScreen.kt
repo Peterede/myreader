@@ -1,4 +1,4 @@
-package com.myreader.app.ui
+package com.edens.myreader.ui
 
 import android.net.Uri
 import android.widget.Toast
@@ -47,9 +47,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.myreader.app.data.BookMeta
-import com.myreader.app.data.BookStore
-import com.myreader.app.tts.Player
+import com.edens.myreader.data.BookMeta
+import com.edens.myreader.data.BookStore
+import com.edens.myreader.tts.Player
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -151,7 +151,7 @@ fun LibraryScreen(
                         val perChapter = if (live.sentenceCount > 0) {
                             live.sentenceIndex.toFloat() / live.sentenceCount
                         } else 0f
-                        ((live.chapterIndex + perChapter) / (live.chapterTitles.size + 1))
+                        ((live.chapterIndex + perChapter) / live.chapterTitles.size.coerceAtLeast(1))
                             .coerceIn(0f, 1f)
                     } else {
                         meta.progress

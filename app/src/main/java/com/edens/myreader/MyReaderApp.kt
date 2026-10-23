@@ -1,9 +1,9 @@
-package com.myreader.app
+package com.edens.myreader
 
 import android.app.Application
-import com.myreader.app.data.BookStore
-import com.myreader.app.service.PlayerService
-import com.myreader.app.tts.Player
+import com.edens.myreader.data.BookStore
+import com.edens.myreader.service.PlayerService
+import com.edens.myreader.tts.Player
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob

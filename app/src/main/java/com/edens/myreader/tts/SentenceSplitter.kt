@@ -1,4 +1,4 @@
-package com.myreader.app.tts
+package com.edens.myreader.tts
 
 /**
  * Splits chapter text into natural sentence-sized units for text-to-speech.

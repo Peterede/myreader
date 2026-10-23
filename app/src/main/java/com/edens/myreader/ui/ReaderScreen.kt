@@ -1,4 +1,4 @@
-package com.myreader.app.ui
+package com.edens.myreader.ui
 
 import android.app.Activity
 import android.view.WindowManager
@@ -30,7 +30,6 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Replay
-import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.AlertDialog
@@ -57,11 +56,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.myreader.app.tts.Player
-import com.myreader.app.tts.VoiceOption
+import com.edens.myreader.tts.Player
+import com.edens.myreader.tts.VoiceOption
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -140,14 +141,15 @@ fun ReaderScreen(
                         Icon(Icons.Default.RecordVoiceOver, contentDescription = "Narration voice")
                     }
                     IconButton(onClick = { player.cycleSpeed() }) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(Icons.Default.Speed, contentDescription = "Playback speed")
-                            Spacer(Modifier.width(4.dp))
-                            Text(
-                                "${state.speed}×",
-                                style = MaterialTheme.typography.labelMedium,
-                            )
-                        }
+                        Text(
+                            "${state.speed}×",
+                            style = MaterialTheme.typography.labelLarge,
+                            maxLines = 1,
+                            softWrap = false,
+                            modifier = Modifier.semantics {
+                                contentDescription = "Playback speed"
+                            },
+                        )
                     }
                 },
             )

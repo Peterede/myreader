@@ -1,6 +1,6 @@
 # MyReader — Play Store release notes
 
-Everything in this file is a checklist for publishing `com.myreader.app`.
+Everything in this file is a checklist for publishing `com.edens.myreader`.
 
 ## 1. Signing
 
@@ -42,8 +42,22 @@ jarsigner -verify -verbose app/build/outputs/bundle/release/app-release.aab | ta
 ```
 
 Each upload to Play needs a **higher `versionCode`**. Current values in
-`app/build.gradle.kts`: `versionCode = 1`, `versionName = "1.0"`. Bump both for
-the next release (`1.0.1` / `2`).
+`app/build.gradle.kts`: `versionCode = 2`, `versionName = "1.0.1"`. Bump both for
+the next release (`1.0.2` / `3`).
+
+> **Never upload a bundle for another app here.** Play binds the upload
+> certificate to the first bundle it accepts for an `applicationId`; a foreign
+> bundle makes every later upload fail with "signed with the wrong key" until the
+> upload key is reset. Confirm the bundle's `applicationId` before uploading.
+>
+> This app was previously `com.myreader.app`; it moved to `com.edens.myreader`
+> after a Marble Master bundle was uploaded to the old listing, which left that
+> app's upload certificate bound to the wrong key. The rename means a new Play
+> listing — start it fresh with this bundle and the upload key above.
+
+Expected upload certificate SHA1:
+`31:68:5A:EF:31:20:11:AC:DF:66:44:8C:36:76:02:AC:A1:A6:07:64`
+(the same value is exported to `keystore/upload_certificate.pem`).
 
 ## 3. Store listing copy
 
@@ -90,14 +104,22 @@ the next release (`1.0.1` / `2`).
 | --- | --- | --- |
 | App icon | `store/icon-512.png` | 512×512 PNG, required |
 | Feature graphic | `store/feature-graphic-1024x500.png` | 1024×500 PNG, required |
-| Phone screenshots | missing | 2–8 PNG/JPEG, min 320 px, portrait ideally 1080×2400 |
+| Phone screenshots | `store/screenshot-1-library.png` … `-4` | 1080×2400 PNG, 4 of the 2–8 Play allows |
 
 Launcher icon vectors live in `app/src/main/res/` (`adaptive-icon` with a
 monochrome variant for themed icons).
 
-Screenshots to capture (library with books, reader playing with highlighted
-sentence, voice picker, notification controls). They can be taken with
-`adb exec-out screencap -p > store/screenshot-1.png` while the app is open.
+The four screenshots were captured on a 1080×2400 emulator with a demo library
+(public-domain Project Gutenberg texts) and Android's demo status bar:
+
+1. `screenshot-1-library.png` — library with saved reading positions
+2. `screenshot-2-reader.png` — reader with the current sentence highlighted
+3. `screenshot-3-reader-speed.png` — 1.5× speed in the top bar
+4. `screenshot-4-reader-position.png` — mid-chapter position slider
+
+Still worth adding later: the narration-voice picker and the playback
+notification. Both need a device with a real speech engine, since the emulator
+images have none (`adb exec-out screencap -p > store/screenshot-5.png`).
 
 ## 5. Play Console declarations
 
@@ -144,7 +166,6 @@ themes; adjust if you want a stricter or broader audience).
 
 ## 7. Known gaps to check before submission
 
-- Phone screenshots are not generated yet.
 - Support email and privacy-policy URL are placeholders in this file.
 - Only one debug/test device has been exercised; run the Play pre-launch report
   on the internal track before production.

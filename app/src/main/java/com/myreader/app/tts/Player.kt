@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import com.myreader.app.data.Book
 import com.myreader.app.data.BookStore
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,6 +16,19 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import java.util.Locale
+
+/** Gender of an installed voice, inferred from the engine's voice name. */
+enum class VoiceGender { MALE, FEMALE, UNKNOWN }
+
+/** A voice offered by the current TTS engine. */
+data class VoiceOption(
+    val name: String,
+    val locale: String,
+    val gender: VoiceGender,
+    /** Human-readable accent (e.g. "American English"), when the locale is known. */
+    val accent: String?,
+    val label: String,
+)
 
 /**
  * Owns the [TextToSpeech] engine and all playback state.
@@ -40,13 +54,21 @@ class Player(context: Context, private val store: BookStore) {
         val speed: Float = 1.0f,
         val finished: Boolean = false,
         val error: String? = null,
+        /** Name of the explicitly chosen voice, or null for the engine default. */
+        val voiceName: String? = null,
+        /** Voices available for the book's language (all voices if none match). */
+        val voices: List<VoiceOption> = emptyList(),
     )
 
     private val appContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private val audioManager = appContext.getSystemService(AudioManager::class.java)
 
-    private val _state = MutableStateFlow(PlayerState())
+    private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    private val _state = MutableStateFlow(
+        PlayerState(voiceName = prefs.getString(KEY_VOICE, null))
+    )
     val state: StateFlow<PlayerState> = _state.asStateFlow()
 
     private var tts: TextToSpeech? = null
@@ -88,9 +110,11 @@ class Player(context: Context, private val store: BookStore) {
             sentenceCount = sentences[ci].size,
             isReady = true,
             speed = _state.value.speed,
+            voiceName = _state.value.voiceName,
+            voices = _state.value.voices,
         )
         ensureTts()
-        applyLanguage()
+        applySpeechSetup()
     }
 
     fun play() {
@@ -123,7 +147,11 @@ class Player(context: Context, private val store: BookStore) {
         ttsCreated = false
         book = null
         sentences = emptyList()
-        _state.value = PlayerState(speed = _state.value.speed)
+        _state.value = PlayerState(
+            speed = _state.value.speed,
+            voiceName = _state.value.voiceName,
+            voices = _state.value.voices,
+        )
     }
 
     fun nextSentence() {
@@ -183,6 +211,33 @@ class Player(context: Context, private val store: BookStore) {
         _state.update { it.copy(speed = speed) }
     }
 
+    /**
+     * Selects a narration voice by its engine name; null restores the default
+     * voice for the book's language.
+     */
+    fun setVoice(name: String?) {
+        prefs.edit().apply {
+            if (name == null) remove(KEY_VOICE) else putString(KEY_VOICE, name)
+        }.apply()
+        _state.update { it.copy(voiceName = name) }
+
+        val tts = tts ?: return
+        val voice = name?.let { n -> availableVoices().firstOrNull { it.name == n } }
+        if (voice != null) {
+            runCatching { tts.voice = voice }
+        } else {
+            applyLanguage()
+            runCatching { tts.voice = tts.defaultVoice }
+        }
+
+        // Restart the current chunk so the change is heard immediately.
+        if (_state.value.isPlaying) {
+            currentUtterance = null
+            tts.stop()
+            mainHandler.post { speakCurrent() }
+        }
+    }
+
     fun sentencesFor(chapterIndex: Int): List<String> =
         sentences.getOrNull(chapterIndex).orEmpty()
 
@@ -218,11 +273,18 @@ class Player(context: Context, private val store: BookStore) {
                     return@post
                 }
                 tts?.setOnUtteranceProgressListener(utteranceListener)
-                applyLanguage()
-                tts?.setSpeechRate(_state.value.speed)
+                applySpeechSetup()
                 if (_state.value.isPlaying) speakCurrent()
             }
         }
+    }
+
+    /** Applies language, saved voice and speed, then refreshes the voice list. */
+    private fun applySpeechSetup() {
+        applyLanguage()
+        applyStoredVoice()
+        tts?.setSpeechRate(_state.value.speed)
+        refreshVoices()
     }
 
     private fun applyLanguage() {
@@ -234,6 +296,98 @@ class Player(context: Context, private val store: BookStore) {
                 tts.language = locale
             }
         }
+    }
+
+    /** Re-applies the persisted voice, dropping it if it is no longer usable. */
+    private fun applyStoredVoice() {
+        val tts = tts ?: return
+        val stored = _state.value.voiceName ?: return
+        val voice = availableVoices().firstOrNull { it.name == stored }
+        val bookLocale = book?.meta?.language?.let { languageOf(it) }
+        val mismatched = voice != null && bookLocale != null &&
+            !sameLanguage(voice.locale, bookLocale)
+        if (voice == null || mismatched) {
+            prefs.edit().remove(KEY_VOICE).apply()
+            _state.update { it.copy(voiceName = null) }
+            return
+        }
+        runCatching { tts.voice = voice }
+    }
+
+    private fun availableVoices(): List<Voice> =
+        runCatching { tts?.voices }.getOrNull().orEmpty().toList()
+
+    /**
+     * Android does not expose a voice's gender, but most engines include
+     * "male"/"female" in the voice name (e.g. Google's `#female_1`), so it can
+     * be inferred from there.
+     */
+    private fun genderOf(voice: Voice): VoiceGender {
+        val name = voice.name.lowercase(Locale.ROOT)
+        return when {
+            name.contains("female") -> VoiceGender.FEMALE
+            name.contains("male") -> VoiceGender.MALE
+            else -> VoiceGender.UNKNOWN
+        }
+    }
+
+    private fun accentOf(locale: Locale): String? {
+        if (!locale.language.equals("en", ignoreCase = true)) return null
+        return when (locale.country.uppercase(Locale.ROOT)) {
+            "US" -> "American English"
+            "GB" -> "British English"
+            "AU" -> "Australian English"
+            "CA" -> "Canadian English"
+            "IN" -> "Indian English"
+            "IE" -> "Irish English"
+            "NZ" -> "New Zealand English"
+            "ZA" -> "South African English"
+            "SG" -> "Singapore English"
+            else -> null
+        }
+    }
+
+    private fun refreshVoices() {
+        val all = availableVoices().filter { it.locale.language.isNotBlank() }
+        if (all.isEmpty()) {
+            _state.update { it.copy(voices = emptyList()) }
+            return
+        }
+        val target = book?.meta?.language?.let { languageOf(it) } ?: Locale.getDefault()
+        val matching = all.filter { sameLanguage(it.locale, target) }
+        val usable = (if (matching.isNotEmpty()) matching else all)
+            .sortedWith(compareBy({ it.locale.toLanguageTag() }, { it.name }))
+
+        var female = 0
+        var male = 0
+        val options = usable.map { voice ->
+            val gender = genderOf(voice)
+            val accent = accentOf(voice.locale)
+            val base = when (gender) {
+                VoiceGender.FEMALE -> "Female ${++female}"
+                VoiceGender.MALE -> "Male ${++male}"
+                VoiceGender.UNKNOWN -> voice.name
+            }
+            VoiceOption(
+                name = voice.name,
+                locale = voice.locale.toLanguageTag(),
+                gender = gender,
+                accent = accent,
+                label = if (accent != null) "$base · $accent" else base,
+            )
+        }
+        _state.update { it.copy(voices = options) }
+    }
+
+    private fun languageOf(tag: String): Locale? =
+        runCatching { Locale.forLanguageTag(tag) }.getOrNull()
+            ?.takeIf { it.language.isNotBlank() }
+
+    private fun sameLanguage(a: Locale, b: Locale): Boolean {
+        if (a.language.equals(b.language, ignoreCase = true)) return true
+        val a3 = runCatching { a.isO3Language }.getOrNull()
+        val b3 = runCatching { b.isO3Language }.getOrNull()
+        return a3 != null && a3.equals(b3, ignoreCase = true)
     }
 
     /**
@@ -404,5 +558,8 @@ class Player(context: Context, private val store: BookStore) {
         const val MAX_CHUNK_CHARS = 260
         const val MIN_CHUNK_CHARS = 80
         const val MAX_SENTENCES_PER_CHUNK = 8
+
+        const val PREFS = "reader_settings"
+        const val KEY_VOICE = "voice_name"
     }
 }

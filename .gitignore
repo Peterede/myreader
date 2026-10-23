@@ -1,0 +1,19 @@
+# Gradle build outputs
+.gradle/
+build/
+app/build/
+
+# Local machine configuration (SDK path)
+local.properties
+
+# Release signing secrets — never commit these
+keystore/
+keystore.properties
+*.jks
+*.keystore
+*.p12
+
+# IDE / OS noise
+.idea/
+*.iml
+.DS_Store

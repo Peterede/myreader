@@ -4,6 +4,7 @@ import android.app.Activity
 import android.view.WindowManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,12 +13,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
@@ -25,25 +28,32 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.RecordVoiceOver
 import androidx.compose.material.icons.filled.Replay
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -51,6 +61,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.myreader.app.tts.Player
+import com.myreader.app.tts.VoiceOption
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -63,6 +74,7 @@ fun ReaderScreen(
     val state by player.state.collectAsState()
     val context = LocalContext.current
     val listState = rememberLazyListState()
+    var showVoiceDialog by rememberSaveable { mutableStateOf(false) }
 
     LaunchedEffect(bookId) { player.open(bookId) }
 
@@ -88,6 +100,15 @@ fun ReaderScreen(
     }
 
     val sentences = player.sentencesFor(state.chapterIndex)
+
+    if (showVoiceDialog) {
+        VoiceDialog(
+            voices = state.voices,
+            selected = state.voiceName,
+            onSelect = { name -> player.setVoice(name) },
+            onDismiss = { showVoiceDialog = false },
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -115,6 +136,9 @@ fun ReaderScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = { showVoiceDialog = true }) {
+                        Icon(Icons.Default.RecordVoiceOver, contentDescription = "Narration voice")
+                    }
                     IconButton(onClick = { player.cycleSpeed() }) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Speed, contentDescription = "Playback speed")
@@ -162,6 +186,80 @@ fun ReaderScreen(
                 )
             }
             item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun VoiceDialog(
+    voices: List<VoiceOption>,
+    selected: String?,
+    onSelect: (String?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Narration voice") },
+        text = {
+            if (voices.isEmpty()) {
+                Text(
+                    "No voices are available yet. Install a speech engine or " +
+                        "language pack in system settings, then try again."
+                )
+            } else {
+                LazyColumn(Modifier.heightIn(max = 400.dp)) {
+                    item {
+                        VoiceRow(
+                            label = "Default",
+                            detail = "Engine default for this language",
+                            checked = selected == null,
+                            onClick = { onSelect(null) },
+                        )
+                    }
+                    items(voices, key = { it.name }) { voice ->
+                        VoiceRow(
+                            label = voice.label,
+                            detail = voice.name,
+                            checked = voice.name == selected,
+                            onClick = { onSelect(voice.name) },
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Close") }
+        },
+    )
+}
+
+@Composable
+private fun VoiceRow(
+    label: String,
+    detail: String?,
+    checked: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectable(selected = checked, onClick = onClick)
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = checked, onClick = null)
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text(label, style = MaterialTheme.typography.bodyLarge)
+            if (detail != null) {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }

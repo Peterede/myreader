@@ -28,7 +28,7 @@ robot reading a wall of text.
 ## Building
 
 Requirements: Android Studio Ladybug+ (or any environment with JDK 17+ and the
-Android SDK 35), an Android device/emulator with a text-to-speech engine
+Android SDK 36), an Android device/emulator with a text-to-speech engine
 installed (most devices ship one; Google Text-to-speech is the default).
 
 ```bash
@@ -37,7 +37,7 @@ cd myreader
 ./gradlew installDebug           # install on a connected device
 ```
 
-minSdk 26 (Android 8.0), targetSdk 35, Kotlin + Jetpack Compose (Material 3).
+minSdk 26 (Android 8.0), targetSdk 36, Kotlin + Jetpack Compose (Material 3).
 
 ## Architecture
 

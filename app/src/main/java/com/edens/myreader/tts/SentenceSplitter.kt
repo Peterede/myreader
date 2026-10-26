@@ -33,7 +33,7 @@ object SentenceSplitter {
             val c = chars[i]
             if (c == '\n' || c == '\r') {
                 // Soft boundary: only a real sentence end breaks here.
-                if (endsSentence(chars, start, i)) {
+                if (endsSentence(chars, start, i) && !continuesInLowercase(chars, i)) {
                     emit(String(chars, start, i - start), sentences)
                     start = skipWhitespace(chars, i)
                 }
@@ -44,7 +44,7 @@ object SentenceSplitter {
                 var end = i + 1
                 while (end < chars.size && isTrailer(chars[end])) end++
                 val boundary = end >= chars.size || chars[end].isWhitespace()
-                if (boundary && isBreak(chars, start, i)) {
+                if (boundary && !continuesInLowercase(chars, end) && isBreak(chars, start, i)) {
                     emit(String(chars, start, end - start), sentences)
                     start = end
                     i = end
@@ -55,6 +55,20 @@ object SentenceSplitter {
         }
         emit(String(chars, start, chars.size - start), sentences)
         return sentences
+    }
+
+    /**
+     * True when the next word after [end] starts lowercase.
+     *
+     * Dialogue and interjections punctuate mid-sentence: `“Why?” she asked.`,
+     * `“Stop!” he shouted.`, `… and then`. Splitting there creates a fragment
+     * that begins with a lowercase word, which engines then read as if it were
+     * a fresh thought. Only an uppercase start is treated as a new sentence.
+     */
+    private fun continuesInLowercase(chars: CharArray, end: Int): Boolean {
+        var j = end
+        while (j < chars.size && chars[j].isWhitespace()) j++
+        return j < chars.size && chars[j].isLowerCase()
     }
 
     private fun skipWhitespace(chars: CharArray, from: Int): Int {

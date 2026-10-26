@@ -213,7 +213,7 @@ private fun VoiceDialog(
                     item {
                         VoiceRow(
                             label = "Default",
-                            detail = "Engine default for this language",
+                            detail = "Best installed voice for this language",
                             checked = selected == null,
                             onClick = { onSelect(null) },
                         )

@@ -28,17 +28,22 @@ data class VoiceOption(
     /** Human-readable accent (e.g. "American English"), when the locale is known. */
     val accent: String?,
     val label: String,
+    /** True for voices synthesised by the engine's server; needs a connection. */
+    val online: Boolean = false,
 )
 
 /**
  * Owns the [TextToSpeech] engine and all playback state.
  *
- * Speech is produced in small paragraph-sized chunks (several sentences per
+ * Speech is produced in paragraph-sized chunks (several sentences per
  * utterance) so the engine keeps continuous, natural prosody instead of
- * restarting its intonation for every sentence. [UtteranceProgressListener.onRangeStart]
- * reports the character position inside the utterance as it is spoken, which is
- * mapped back to the current sentence so the UI stays in sync. After a seek or
- * pause/resume the chunk is rebuilt starting at the selected sentence.
+ * restarting its intonation for every sentence. Chunks never span a paragraph
+ * break, so the engine only applies its emphatic utterance-final contour where
+ * the book itself ends a paragraph — not at arbitrary full stops mid-paragraph.
+ * [UtteranceProgressListener.onRangeStart] reports the character position inside
+ * the utterance as it is spoken, which is mapped back to the current sentence so
+ * the UI stays in sync. After a seek or pause/resume the chunk is rebuilt
+ * starting at the selected sentence.
  */
 class Player(context: Context, private val store: BookStore) {
 
@@ -75,6 +80,9 @@ class Player(context: Context, private val store: BookStore) {
     private var ttsCreated = false
     private var book: Book? = null
     private var sentences: List<List<String>> = emptyList()
+
+    /** Per chapter: true where a sentence begins a new paragraph. */
+    private var sentenceStartsParagraph: List<BooleanArray> = emptyList()
     private var currentUtterance: String? = null
     private var focusRequest: AudioFocusRequest? = null
     private val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
@@ -95,7 +103,13 @@ class Player(context: Context, private val store: BookStore) {
             return
         }
         book = loaded
-        sentences = loaded.chapters.map { SentenceSplitter.split(it.text) }
+        val paragraphs = loaded.chapters.map { chapter ->
+            chapter.text.split(PARAGRAPH_BREAK)
+                .map { SentenceSplitter.split(it) }
+                .filter { it.isNotEmpty() }
+        }
+        sentences = paragraphs.map { chapter -> chapter.flatten() }
+        sentenceStartsParagraph = paragraphs.map { chapter -> paragraphStarts(chapter) }
         val ci = loaded.meta.chapterIndex.coerceIn(0, loaded.chapters.lastIndex)
         val si = loaded.meta.sentenceIndex.coerceIn(
             0,
@@ -152,6 +166,7 @@ class Player(context: Context, private val store: BookStore) {
         ttsCreated = false
         book = null
         sentences = emptyList()
+        sentenceStartsParagraph = emptyList()
         _state.value = PlayerState(
             speed = _state.value.speed,
             voiceName = _state.value.voiceName,
@@ -232,7 +247,7 @@ class Player(context: Context, private val store: BookStore) {
             runCatching { tts.voice = voice }
         } else {
             applyLanguage()
-            runCatching { tts.voice = tts.defaultVoice }
+            applyVoice()
         }
 
         // Restart the current chunk so the change is heard immediately.
@@ -288,7 +303,7 @@ class Player(context: Context, private val store: BookStore) {
     /** Applies language, saved voice and speed, then refreshes the voice list. */
     private fun applySpeechSetup() {
         applyLanguage()
-        applyStoredVoice()
+        applyVoice()
         tts?.setSpeechRate(_state.value.speed)
         refreshVoices()
     }
@@ -304,10 +319,17 @@ class Player(context: Context, private val store: BookStore) {
         }
     }
 
-    /** Re-applies the persisted voice, dropping it if it is no longer usable. */
-    private fun applyStoredVoice() {
+    /**
+     * Applies the chosen voice, or the best installed one when none is chosen,
+     * dropping a persisted voice that is no longer usable.
+     */
+    private fun applyVoice() {
         val tts = tts ?: return
-        val stored = _state.value.voiceName ?: return
+        val stored = _state.value.voiceName
+        if (stored == null) {
+            recommendedVoice()?.let { voice -> runCatching { tts.voice = voice } }
+            return
+        }
         val voice = availableVoices().firstOrNull { it.name == stored }
         val bookLocale = book?.meta?.language?.let { languageOf(it) }
         val mismatched = voice != null && bookLocale != null &&
@@ -315,10 +337,49 @@ class Player(context: Context, private val store: BookStore) {
         if (voice == null || mismatched) {
             prefs.edit().remove(KEY_VOICE).apply()
             _state.update { it.copy(voiceName = null) }
+            recommendedVoice()?.let { fallback -> runCatching { tts.voice = fallback } }
             return
         }
         runCatching { tts.voice = voice }
     }
+
+    /**
+     * Picks the most natural installed voice for the book's language.
+     *
+     * Engines are free to default to a tiny "embedded" voice, whose prosody is
+     * crude — words before punctuation get a clipped, over-stressed contour.
+     * The highest-quality installed voice that also works offline (no network
+     * round trip, no text leaving the device) is a much better default; the
+     * user can still pick any other voice explicitly.
+     */
+    private fun recommendedVoice(): Voice? {
+        val deviceLocale = Locale.getDefault()
+        val bookLocale = book?.meta?.language?.let { languageOf(it) }
+        val candidates = availableVoices()
+            .filter { sameLanguage(it.locale, bookLocale ?: deviceLocale) }
+            .filter { !it.isNetworkConnectionRequired }
+        return candidates.sortedWith(
+            compareByDescending<Voice> {
+                localeScore(it.locale, bookLocale?.country.orEmpty(), deviceLocale.country)
+            }
+                .thenByDescending { it.quality }
+                .thenBy { it.name },
+        ).firstOrNull()
+    }
+
+    /**
+     * The book's own region wins, then the device's, so an `en` book on a US
+     * phone gets an American voice rather than whichever English variant
+     * happens to sort first.
+     */
+    private fun localeScore(locale: Locale, bookCountry: String, deviceCountry: String): Int =
+        when {
+            bookCountry.isNotEmpty() && locale.country.equals(bookCountry, ignoreCase = true) -> 2
+            deviceCountry.isNotEmpty() &&
+                locale.country.equals(deviceCountry, ignoreCase = true) -> 1
+
+            else -> 0
+        }
 
     private fun availableVoices(): List<Voice> =
         runCatching { tts?.voices }.getOrNull().orEmpty().toList()
@@ -362,7 +423,11 @@ class Player(context: Context, private val store: BookStore) {
         val target = book?.meta?.language?.let { languageOf(it) } ?: Locale.getDefault()
         val matching = all.filter { sameLanguage(it.locale, target) }
         val usable = (if (matching.isNotEmpty()) matching else all)
-            .sortedWith(compareBy({ it.locale.toLanguageTag() }, { it.name }))
+            .sortedWith(
+                compareByDescending<Voice> { it.quality }
+                    .thenBy { it.locale.toLanguageTag() }
+                    .thenBy { it.name },
+            )
 
         var female = 0
         var male = 0
@@ -374,12 +439,18 @@ class Player(context: Context, private val store: BookStore) {
                 VoiceGender.MALE -> "Male ${++male}"
                 VoiceGender.UNKNOWN -> voice.name
             }
+            val parts = listOfNotNull(
+                base,
+                accent,
+                if (voice.isNetworkConnectionRequired) "online" else null,
+            )
             VoiceOption(
                 name = voice.name,
                 locale = voice.locale.toLanguageTag(),
                 gender = gender,
                 accent = accent,
-                label = if (accent != null) "$base · $accent" else base,
+                label = parts.joinToString(" · "),
+                online = voice.isNetworkConnectionRequired,
             )
         }
         _state.update { it.copy(voices = options) }
@@ -411,31 +482,30 @@ class Player(context: Context, private val store: BookStore) {
             endOfBook()
             return
         }
+        val chunk = SpeechChunker.plan(
+            sentences = sents,
+            startsParagraph = sentenceStartsParagraph.getOrNull(st.chapterIndex),
+            from = st.sentenceIndex,
+        )
 
-        val text = StringBuilder()
-        val offsets = ArrayList<Int>()
-        var count = 0
-        var idx = st.sentenceIndex
-        while (idx < sents.size && count < MAX_SENTENCES_PER_CHUNK) {
-            val s = sents[idx]
-            if (count > 0 && text.length + 1 + s.length > MAX_CHUNK_CHARS && text.length >= MIN_CHUNK_CHARS) {
-                break
-            }
-            if (count > 0) text.append(' ')
-            offsets += text.length
-            text.append(s)
-            count++
-            idx++
-            if (text.length >= MAX_CHUNK_CHARS) break
-        }
-
-        chunkStart = st.sentenceIndex
-        chunkSize = count
-        chunkOffsets = offsets.toIntArray()
+        chunkStart = chunk.start
+        chunkSize = chunk.sentenceCount
+        chunkOffsets = chunk.sentenceOffsets
 
         val id = "${st.chapterIndex}:${st.sentenceIndex}"
         currentUtterance = id
-        tts.speak(text.toString(), TextToSpeech.QUEUE_FLUSH, null, id)
+        tts.speak(chunk.text, TextToSpeech.QUEUE_FLUSH, null, id)
+    }
+
+    /** Marks the sentences that open a paragraph. */
+    private fun paragraphStarts(paragraphs: List<List<String>>): BooleanArray {
+        val starts = BooleanArray(paragraphs.sumOf { it.size })
+        var idx = 0
+        for (paragraph in paragraphs) {
+            if (paragraph.isNotEmpty()) starts[idx] = true
+            idx += paragraph.size
+        }
+        return starts
     }
 
     private val utteranceListener = object : UtteranceProgressListener() {
@@ -584,10 +654,8 @@ class Player(context: Context, private val store: BookStore) {
     }
 
     private companion object {
-        /** Roughly a paragraph of speech per utterance. */
-        const val MAX_CHUNK_CHARS = 260
-        const val MIN_CHUNK_CHARS = 80
-        const val MAX_SENTENCES_PER_CHUNK = 8
+        /** Blank line in the chapter text; a single newline is just wrapping. */
+        val PARAGRAPH_BREAK = Regex("""\n[ \t]*\n""")
 
         const val PREFS = "reader_settings"
         const val KEY_VOICE = "voice_name"

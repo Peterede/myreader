@@ -43,7 +43,9 @@ data class VoiceOption(
  * [UtteranceProgressListener.onRangeStart] reports the character position inside
  * the utterance as it is spoken, which is mapped back to the current sentence so
  * the UI stays in sync. After a seek or pause/resume the chunk is rebuilt
- * starting at the selected sentence.
+ * starting at the selected sentence. Consecutive chunks are handed off with a
+ * short beat of silence at paragraph breaks and a longer one between chapters,
+ * so paragraphs are paced like an audiobook instead of running together.
  */
 class Player(context: Context, private val store: BookStore) {
 
@@ -91,6 +93,10 @@ class Player(context: Context, private val store: BookStore) {
     private var chunkStart = 0
     private var chunkSize = 1
     private var chunkOffsets = intArrayOf(0)
+    private var chunkEndsParagraph = false
+
+    /** Queued hand-off to the next chunk, so a pause or seek can cancel it. */
+    private var pendingSpeak: Runnable? = null
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -137,12 +143,13 @@ class Player(context: Context, private val store: BookStore) {
         ensureTts()
         requestAudioFocus()
         _state.update { it.copy(isPlaying = true, finished = false) }
-        mainHandler.post { speakCurrent() }
+        scheduleSpeak()
     }
 
     fun pause() = pauseInternal(abandonFocus = true)
 
     private fun pauseInternal(abandonFocus: Boolean) {
+        cancelPendingSpeak()
         if (abandonFocus) {
             resumeOnFocusGain = false
             abandonAudioFocus()
@@ -254,7 +261,7 @@ class Player(context: Context, private val store: BookStore) {
         if (_state.value.isPlaying) {
             currentUtterance = null
             tts.stop()
-            mainHandler.post { speakCurrent() }
+            scheduleSpeak()
         }
     }
 
@@ -262,6 +269,7 @@ class Player(context: Context, private val store: BookStore) {
         sentences.getOrNull(chapterIndex).orEmpty()
 
     fun endOfBook() {
+        cancelPendingSpeak()
         currentUtterance = null
         resumeOnFocusGain = false
         tts?.stop()
@@ -295,7 +303,7 @@ class Player(context: Context, private val store: BookStore) {
                 }
                 tts?.setOnUtteranceProgressListener(utteranceListener)
                 applySpeechSetup()
-                if (_state.value.isPlaying) speakCurrent()
+                if (_state.value.isPlaying) scheduleSpeak()
             }
         }
     }
@@ -482,19 +490,52 @@ class Player(context: Context, private val store: BookStore) {
             endOfBook()
             return
         }
-        val chunk = SpeechChunker.plan(
-            sentences = sents,
-            startsParagraph = sentenceStartsParagraph.getOrNull(st.chapterIndex),
-            from = st.sentenceIndex,
-        )
+        val startsParagraph = sentenceStartsParagraph.getOrNull(st.chapterIndex)
+        var chunk = SpeechChunker.plan(sents, startsParagraph, from = st.sentenceIndex)
+        // A sentence that is nothing but a footnote marker or scene break is
+        // silent once normalized; an empty utterance would stall the engine, so
+        // step over such sentences instead.
+        while (chunk.text.isBlank()) {
+            val next = chunk.start + chunk.sentenceCount
+            if (next >= sents.size) {
+                endOfBook()
+                return
+            }
+            chunk = SpeechChunker.plan(sents, startsParagraph, from = next)
+        }
+        if (chunk.start != st.sentenceIndex) {
+            _state.update { it.copy(sentenceIndex = chunk.start) }
+        }
 
         chunkStart = chunk.start
         chunkSize = chunk.sentenceCount
         chunkOffsets = chunk.sentenceOffsets
+        chunkEndsParagraph = chunk.endsParagraph
 
-        val id = "${st.chapterIndex}:${st.sentenceIndex}"
+        val id = "${st.chapterIndex}:${chunk.start}"
         currentUtterance = id
         tts.speak(chunk.text, TextToSpeech.QUEUE_FLUSH, null, id)
+    }
+
+    /**
+     * Speaks the current chunk after [delayMs], replacing any hand-off that is
+     * still waiting. Everything that changes what should be spoken (pause,
+     * seek, voice change, stop) cancels the pending runnable first, so a beat
+     * of silence can never resurrect stale playback.
+     */
+    private fun scheduleSpeak(delayMs: Long = 0) {
+        cancelPendingSpeak()
+        val runnable = Runnable {
+            pendingSpeak = null
+            speakCurrent()
+        }
+        pendingSpeak = runnable
+        if (delayMs > 0) mainHandler.postDelayed(runnable, delayMs) else mainHandler.post(runnable)
+    }
+
+    private fun cancelPendingSpeak() {
+        pendingSpeak?.let { mainHandler.removeCallbacks(it) }
+        pendingSpeak = null
     }
 
     /** Marks the sentences that open a paragraph. */
@@ -552,7 +593,8 @@ class Player(context: Context, private val store: BookStore) {
         if (nextStart < st.sentenceCount) {
             _state.update { it.copy(sentenceIndex = nextStart) }
             persist()
-            speakCurrent()
+            // A beat between paragraphs, so they are not read as one breath.
+            scheduleSpeak(if (chunkEndsParagraph) PARAGRAPH_PAUSE_MS else 0)
         } else if (st.chapterIndex + 1 < st.chapterTitles.size) {
             _state.update {
                 it.copy(
@@ -563,7 +605,7 @@ class Player(context: Context, private val store: BookStore) {
                 )
             }
             persist()
-            speakCurrent()
+            scheduleSpeak(CHAPTER_PAUSE_MS)
         } else {
             endOfBook()
         }
@@ -584,7 +626,7 @@ class Player(context: Context, private val store: BookStore) {
         persist()
         if (playing) {
             requestAudioFocus()
-            mainHandler.post { speakCurrent() }
+            scheduleSpeak()
         }
     }
 
@@ -656,6 +698,10 @@ class Player(context: Context, private val store: BookStore) {
     private companion object {
         /** Blank line in the chapter text; a single newline is just wrapping. */
         val PARAGRAPH_BREAK = Regex("""\n[ \t]*\n""")
+
+        /** Silence between paragraphs and between chapters, in milliseconds. */
+        const val PARAGRAPH_PAUSE_MS = 400L
+        const val CHAPTER_PAUSE_MS = 900L
 
         const val PREFS = "reader_settings"
         const val KEY_VOICE = "voice_name"

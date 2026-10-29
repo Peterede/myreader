@@ -10,6 +10,12 @@ internal data class SpeechChunk(
     val text: String,
     /** Character offset of each sentence inside [text]. */
     val sentenceOffsets: IntArray,
+    /**
+     * True when the chunk ends on a paragraph boundary (or the end of the
+     * chapter), so the next chunk opens a new paragraph. The player leaves a
+     * short beat of silence there, the way a narrator does.
+     */
+    val endsParagraph: Boolean,
 )
 
 /**
@@ -68,11 +74,17 @@ internal object SpeechChunker {
             idx++
         }
 
+        // Ending where the next chunk would open a paragraph is what earns the
+        // pause; a chunk cut short by a size cap runs straight on.
+        val next = from + count
+        val endsParagraph = next >= sentences.size || startsParagraph?.getOrNull(next) == true
+
         return SpeechChunk(
             start = from,
             sentenceCount = count,
             text = text.toString(),
             sentenceOffsets = offsets.toIntArray(),
+            endsParagraph = endsParagraph,
         )
     }
 }

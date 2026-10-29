@@ -1,6 +1,7 @@
 package com.edens.myreader.tts
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -68,6 +69,30 @@ class SpeechChunkerTest {
 
         assertEquals(1, chunk.sentenceCount)
         assertEquals(huge, chunk.text)
+    }
+
+    @Test
+    fun `a chunk that ends a paragraph is flagged for a pause`() {
+        val chunk = SpeechChunker.plan(sentences, paragraphStarts(0, 2), from = 0)
+
+        assertTrue(chunk.endsParagraph)
+    }
+
+    @Test
+    fun `a chunk cut short by the size cap runs straight on`() {
+        val long = List(20) { "Sentence number $it with enough words to matter." }
+        val starts = BooleanArray(long.size).also { it[0] = true }
+
+        val chunk = SpeechChunker.plan(long, starts, from = 0)
+
+        assertFalse(chunk.endsParagraph)
+    }
+
+    @Test
+    fun `the last chunk of a chapter ends a paragraph`() {
+        val chunk = SpeechChunker.plan(sentences, null, from = 3)
+
+        assertTrue(chunk.endsParagraph)
     }
 
     @Test

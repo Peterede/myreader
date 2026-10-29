@@ -42,8 +42,8 @@ jarsigner -verify -verbose app/build/outputs/bundle/release/app-release.aab | ta
 ```
 
 Each upload to Play needs a **higher `versionCode`**. Current values in
-`app/build.gradle.kts`: `versionCode = 4`, `versionName = "1.0.3"`. Bump both for
-the next release (`1.0.4` / `5`).
+`app/build.gradle.kts`: `versionCode = 5`, `versionName = "1.0.4"`. Bump both for
+the next release (`1.0.5` / `6`).
 
 > **Never upload a bundle for another app here.** Play binds the upload
 > certificate to the first bundle it accepts for an `applicationId`; a foreign

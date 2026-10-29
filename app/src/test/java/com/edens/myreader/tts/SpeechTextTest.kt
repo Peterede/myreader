@@ -72,6 +72,51 @@ class SpeechTextTest {
     }
 
     @Test
+    fun `latin abbreviations are read as words`() {
+        assertEquals(
+            "Use a spoon, for example, this one, or a fork, that is, whatever.",
+            SpeechText.forSpeech("Use a spoon, e.g. this one, or a fork, i.e. whatever."),
+        )
+        assertEquals("Apples, oranges, et cetera, are fine.", SpeechText.forSpeech("Apples, oranges, etc., are fine."))
+        assertEquals("It was him versus her.", SpeechText.forSpeech("It was him vs. her."))
+    }
+
+    @Test
+    fun `a sentence-final latin abbreviation keeps its full stop`() {
+        assertEquals("Bring pens, et cetera.", SpeechText.forSpeech("Bring pens, etc."))
+    }
+
+    @Test
+    fun `an ampersand is read as and`() {
+        assertEquals("Tom and Jerry.", SpeechText.forSpeech("Tom & Jerry."))
+        assertEquals("AT&T is a company.", SpeechText.forSpeech("AT&T is a company."))
+    }
+
+    @Test
+    fun `a numbered reference is read as number`() {
+        assertEquals("See chapter number 5.", SpeechText.forSpeech("See chapter No. 5."))
+    }
+
+    @Test
+    fun `footnote markers are not read out`() {
+        assertEquals(
+            "The remark was never explained.",
+            SpeechText.forSpeech("The remark was never explained.[12]"),
+        )
+        assertEquals("He left then.", SpeechText.forSpeech("He left¹⁴ then."))
+    }
+
+    @Test
+    fun `emphasis asterisks are dropped`() {
+        assertEquals("He was very angry.", SpeechText.forSpeech("He was *very* angry."))
+    }
+
+    @Test
+    fun `a spaced scene break is left alone`() {
+        assertEquals("* * *", SpeechText.forSpeech("* * *"))
+    }
+
+    @Test
     fun `surrounding whitespace is trimmed and collapsed`() {
         assertEquals("A calm sentence.", SpeechText.forSpeech("  A   calm\tsentence.  "))
     }

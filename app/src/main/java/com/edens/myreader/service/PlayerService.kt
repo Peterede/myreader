@@ -168,8 +168,14 @@ class PlayerService : Service() {
             runCatching { context.startForegroundService(intent) }
         }
 
+        /**
+         * Tears the service down. Uses [Context.stopService] rather than an
+         * `ACTION_STOP` intent: starting a service from the background throws
+         * [android.app.BackgroundServiceStartNotAllowedException] on Android 12+,
+         * and there is nothing left for the service to do once playback ended.
+         */
         fun stop(context: Context) {
-            context.startService(Intent(context, PlayerService::class.java).setAction(ACTION_STOP))
+            context.stopService(Intent(context, PlayerService::class.java))
         }
     }
 }

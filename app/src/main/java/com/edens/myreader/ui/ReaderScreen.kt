@@ -61,6 +61,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.edens.myreader.tts.EngineOption
 import com.edens.myreader.tts.Player
 import com.edens.myreader.tts.VoiceOption
 import kotlin.math.roundToInt
@@ -107,6 +108,9 @@ fun ReaderScreen(
             voices = state.voices,
             selected = state.voiceName,
             onSelect = { name -> player.setVoice(name) },
+            engines = state.engines,
+            selectedEngine = state.enginePackage,
+            onSelectEngine = { name -> player.setEngine(name) },
             onDismiss = { showVoiceDialog = false },
         )
     }
@@ -197,19 +201,45 @@ private fun VoiceDialog(
     voices: List<VoiceOption>,
     selected: String?,
     onSelect: (String?) -> Unit,
+    engines: List<EngineOption>,
+    selectedEngine: String?,
+    onSelectEngine: (String?) -> Unit,
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Narration voice") },
+        title = { Text("Narration") },
         text = {
-            if (voices.isEmpty()) {
-                Text(
-                    "No voices are available yet. Install a speech engine or " +
-                        "language pack in system settings, then try again."
-                )
-            } else {
-                LazyColumn(Modifier.heightIn(max = 400.dp)) {
+            LazyColumn(Modifier.heightIn(max = 440.dp)) {
+                item { SectionHeader("Engine") }
+                item {
+                    VoiceRow(
+                        label = "System default",
+                        detail = engines.firstOrNull { it.isSystemDefault }?.label
+                            ?: "The engine Android is set to use",
+                        checked = selectedEngine == null,
+                        onClick = { onSelectEngine(null) },
+                    )
+                }
+                items(engines, key = { it.packageName }) { engine ->
+                    VoiceRow(
+                        label = engine.label,
+                        detail = engine.packageName,
+                        checked = engine.packageName == selectedEngine,
+                        onClick = { onSelectEngine(engine.packageName) },
+                    )
+                }
+
+                item { SectionHeader("Voice") }
+                if (voices.isEmpty()) {
+                    item {
+                        Text(
+                            "No voices are available yet. Install a speech engine or " +
+                                "language pack in system settings, then try again.",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                } else {
                     item {
                         VoiceRow(
                             label = "Default",
@@ -232,6 +262,16 @@ private fun VoiceDialog(
         confirmButton = {
             TextButton(onClick = onDismiss) { Text("Close") }
         },
+    )
+}
+
+@Composable
+private fun SectionHeader(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 12.dp, bottom = 4.dp),
     )
 }
 

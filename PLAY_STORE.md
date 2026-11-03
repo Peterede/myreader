@@ -42,8 +42,17 @@ jarsigner -verify -verbose app/build/outputs/bundle/release/app-release.aab | ta
 ```
 
 Each upload to Play needs a **higher `versionCode`**. Current values in
-`app/build.gradle.kts`: `versionCode = 5`, `versionName = "1.0.4"`. Bump both for
-the next release (`1.0.5` / `6`).
+`app/build.gradle.kts`: `versionCode = 6`, `versionName = "1.0.5"`. Bump both for
+the next release (`1.0.6` / `7`).
+
+**Release notes** (paste into Play Console → *What's new* for 1.0.5):
+
+> • Choose your speech engine: MyReader can now narrate with any text-to-speech
+>   engine installed on your device, such as Supertonic TTS, not just the system
+>   default one.
+> • Narration voices are listed by gender and number (e.g. "Female 3", "Male 3"),
+>   so engines that offer many styles are easy to tell apart.
+> • Your engine and voice choice is remembered between sessions.
 
 > **Never upload a bundle for another app here.** Play binds the upload
 > certificate to the first bundle it accepts for an `applicationId`; a foreign

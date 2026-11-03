@@ -1,11 +1,13 @@
 package com.edens.myreader.tts
 
 import android.content.Context
+import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
@@ -19,6 +21,17 @@ import java.util.Locale
 
 /** Gender of an installed voice, inferred from the engine's voice name. */
 enum class VoiceGender { MALE, FEMALE, UNKNOWN }
+
+/**
+ * A speech engine installed on the device: any app that registers an Android
+ * text-to-speech service, such as Google's engine or Supertonic.
+ */
+data class EngineOption(
+    val packageName: String,
+    val label: String,
+    /** True for the engine Android is configured to use by default. */
+    val isSystemDefault: Boolean,
+)
 
 /** A voice offered by the current TTS engine. */
 data class VoiceOption(
@@ -65,6 +78,10 @@ class Player(context: Context, private val store: BookStore) {
         val voiceName: String? = null,
         /** Voices available for the book's language (all voices if none match). */
         val voices: List<VoiceOption> = emptyList(),
+        /** Package of the speech engine in use, or null for the system default. */
+        val enginePackage: String? = null,
+        /** Speech engines installed on the device. */
+        val engines: List<EngineOption> = emptyList(),
     )
 
     private val appContext = context.applicationContext
@@ -80,6 +97,9 @@ class Player(context: Context, private val store: BookStore) {
 
     private var tts: TextToSpeech? = null
     private var ttsCreated = false
+
+    /** Set when a chosen engine failed to start, so this session uses the default. */
+    private var forceDefaultEngine = false
     private var book: Book? = null
     private var sentences: List<List<String>> = emptyList()
 
@@ -132,6 +152,8 @@ class Player(context: Context, private val store: BookStore) {
             speed = _state.value.speed,
             voiceName = _state.value.voiceName,
             voices = _state.value.voices,
+            enginePackage = _state.value.enginePackage,
+            engines = _state.value.engines,
         )
         ensureTts()
         applySpeechSetup()
@@ -178,6 +200,8 @@ class Player(context: Context, private val store: BookStore) {
             speed = _state.value.speed,
             voiceName = _state.value.voiceName,
             voices = _state.value.voices,
+            enginePackage = _state.value.enginePackage,
+            engines = _state.value.engines,
         )
     }
 
@@ -239,6 +263,35 @@ class Player(context: Context, private val store: BookStore) {
     }
 
     /**
+     * Selects the speech engine by its package name ([packageName]), or null
+     * for the system default, and restarts narration with it so the change is
+     * heard immediately.
+     */
+    fun setEngine(packageName: String?) {
+        prefs.edit()
+            .putString(KEY_ENGINE, packageName ?: SYSTEM_ENGINE)
+            .apply()
+        forceDefaultEngine = false
+        if (_state.value.enginePackage == packageName) return
+
+        val playing = _state.value.isPlaying
+        currentUtterance = null
+        cancelPendingSpeak()
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
+        ttsCreated = false
+        // Voices belong to the engine, so the old list is stale; the new one
+        // arrives once the engine is connected.
+        _state.update { it.copy(enginePackage = packageName, voices = emptyList()) }
+        ensureTts()
+        if (playing) {
+            requestAudioFocus()
+            scheduleSpeak()
+        }
+    }
+
+    /**
      * Selects a narration voice by its engine name; null restores the default
      * voice for the book's language.
      */
@@ -289,31 +342,98 @@ class Player(context: Context, private val store: BookStore) {
     private fun ensureTts() {
         if (ttsCreated) return
         ttsCreated = true
-        tts = TextToSpeech(appContext) { status ->
-            mainHandler.post {
-                if (status != TextToSpeech.SUCCESS) {
-                    ttsCreated = false
-                    _state.update {
-                        it.copy(
-                            isPlaying = false,
-                            error = "Text-to-speech engine is unavailable. Install/enable a TTS engine in system settings.",
-                        )
-                    }
-                    return@post
-                }
-                tts?.setOnUtteranceProgressListener(utteranceListener)
-                applySpeechSetup()
-                if (_state.value.isPlaying) scheduleSpeak()
-            }
+        val enginePackage = resolveEnginePackage()
+        _state.update { it.copy(enginePackage = enginePackage) }
+        val listener = TextToSpeech.OnInitListener { status ->
+            mainHandler.post { onTtsInit(enginePackage, status) }
+        }
+        tts = if (enginePackage != null) {
+            TextToSpeech(appContext, listener, enginePackage)
+        } else {
+            TextToSpeech(appContext, listener)
         }
     }
 
-    /** Applies language, saved voice and speed, then refreshes the voice list. */
+    /**
+     * Runs once the engine is connected. A chosen engine can still fail to
+     * start (uninstalled, model missing, crashed), which must not leave
+     * narration permanently broken: fall back to the system default and store
+     * that choice so the next launch starts cleanly.
+     */
+    private fun onTtsInit(enginePackage: String?, status: Int) {
+        if (status != TextToSpeech.SUCCESS) {
+            if (enginePackage != null) {
+                forceDefaultEngine = true
+                tts?.shutdown()
+                tts = null
+                ttsCreated = false
+                if (prefs.getString(KEY_ENGINE, null) == enginePackage) {
+                    prefs.edit().putString(KEY_ENGINE, SYSTEM_ENGINE).apply()
+                }
+                ensureTts()
+                return
+            }
+            ttsCreated = false
+            _state.update {
+                it.copy(
+                    isPlaying = false,
+                    error = "Text-to-speech engine is unavailable. Install/enable a TTS engine in system settings.",
+                )
+            }
+            return
+        }
+        tts?.setOnUtteranceProgressListener(utteranceListener)
+        applySpeechSetup()
+        if (_state.value.isPlaying) scheduleSpeak()
+    }
+
+    /**
+     * The engine to speak with: the stored choice while it is still installed,
+     * otherwise Supertonic if it is installed, otherwise the system default.
+     */
+    private fun resolveEnginePackage(): String? {
+        if (forceDefaultEngine) return null
+        val installed = installedEngines().map { it.packageName }
+        return when (val pref = prefs.getString(KEY_ENGINE, null)) {
+            SYSTEM_ENGINE -> null
+            null -> SUPERTONIC_PACKAGE.takeIf { it in installed }
+            else -> pref.takeIf { it in installed }
+        }
+    }
+
+    /**
+     * Speech engines installed on the device. Seeing anything other than the
+     * default engine relies on the TTS_SERVICE `<queries>` entry in the
+     * manifest (Android 11 package visibility).
+     */
+    private fun installedEngines(): List<EngineOption> {
+        val pm = appContext.packageManager
+        val defaultEngine = runCatching {
+            Settings.Secure.getString(appContext.contentResolver, Settings.Secure.TTS_DEFAULT_SYNTH)
+        }.getOrNull()
+        return runCatching {
+            pm.queryIntentServices(Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0)
+                .mapNotNull { it.serviceInfo }
+                .distinctBy { it.packageName }
+                .map { service ->
+                    EngineOption(
+                        packageName = service.packageName,
+                        label = runCatching { service.loadLabel(pm).toString() }
+                            .getOrDefault(service.packageName),
+                        isSystemDefault = service.packageName == defaultEngine,
+                    )
+                }
+                .sortedBy { it.label.lowercase(Locale.ROOT) }
+        }.getOrDefault(emptyList())
+    }
+
+    /** Applies language, saved voice and speed, then refreshes the pickers. */
     private fun applySpeechSetup() {
         applyLanguage()
         applyVoice()
         tts?.setSpeechRate(_state.value.speed)
         refreshVoices()
+        _state.update { it.copy(engines = installedEngines()) }
     }
 
     private fun applyLanguage() {
@@ -333,12 +453,16 @@ class Player(context: Context, private val store: BookStore) {
      */
     private fun applyVoice() {
         val tts = tts ?: return
+        // Before the engine is connected it reports no voices; applying the
+        // stored one then would drop a perfectly good choice.
+        val voices = availableVoices()
+        if (voices.isEmpty()) return
         val stored = _state.value.voiceName
         if (stored == null) {
             recommendedVoice()?.let { voice -> runCatching { tts.voice = voice } }
             return
         }
-        val voice = availableVoices().firstOrNull { it.name == stored }
+        val voice = voices.firstOrNull { it.name == stored }
         val bookLocale = book?.meta?.language?.let { languageOf(it) }
         val mismatched = voice != null && bookLocale != null &&
             !sameLanguage(voice.locale, bookLocale)
@@ -393,17 +517,29 @@ class Player(context: Context, private val store: BookStore) {
         runCatching { tts?.voices }.getOrNull().orEmpty().toList()
 
     /**
-     * Android does not expose a voice's gender, but most engines include
-     * "male"/"female" in the voice name (e.g. Google's `#female_1`), so it can
-     * be inferred from there.
+     * Android does not expose a voice's gender, but engines name their voices
+     * accordingly: Google's `#female_1`, Supertonic's `en-supertonic-F3` and
+     * `...-M1`. Both spellings are recognised here.
      */
     private fun genderOf(voice: Voice): VoiceGender {
         val name = voice.name.lowercase(Locale.ROOT)
         return when {
             name.contains("female") -> VoiceGender.FEMALE
             name.contains("male") -> VoiceGender.MALE
-            else -> VoiceGender.UNKNOWN
+            else -> nameNumber(name)?.first ?: VoiceGender.UNKNOWN
         }
+    }
+
+    /**
+     * The gender and number a short voice token carries (`F3`, `M1`), so an
+     * engine like Supertonic can be listed as "Female 3" / "Male 1" instead of
+     * ten raw ids that mean nothing to a reader.
+     */
+    private fun nameNumber(lowercaseName: String): Pair<VoiceGender, Int>? {
+        val match = VOICE_TOKEN.find(lowercaseName) ?: return null
+        val number = match.groupValues[2].toIntOrNull() ?: return null
+        val gender = if (match.groupValues[1] == "f") VoiceGender.FEMALE else VoiceGender.MALE
+        return gender to number
     }
 
     private fun accentOf(locale: Locale): String? {
@@ -442,9 +578,14 @@ class Player(context: Context, private val store: BookStore) {
         val options = usable.map { voice ->
             val gender = genderOf(voice)
             val accent = accentOf(voice.locale)
+            // Keep the engine's own numbering (Supertonic's F3 stays "Female 3")
+            // and count only the voices that do not carry one.
+            if (gender == VoiceGender.FEMALE) female++
+            if (gender == VoiceGender.MALE) male++
+            val engineNumber = nameNumber(voice.name.lowercase(Locale.ROOT))?.second
             val base = when (gender) {
-                VoiceGender.FEMALE -> "Female ${++female}"
-                VoiceGender.MALE -> "Male ${++male}"
+                VoiceGender.FEMALE -> "Female ${engineNumber ?: female}"
+                VoiceGender.MALE -> "Male ${engineNumber ?: male}"
                 VoiceGender.UNKNOWN -> voice.name
             }
             val parts = listOfNotNull(
@@ -705,5 +846,19 @@ class Player(context: Context, private val store: BookStore) {
 
         const val PREFS = "reader_settings"
         const val KEY_VOICE = "voice_name"
+        const val KEY_ENGINE = "engine_package"
+
+        /** Stored engine preference meaning "whatever Android is set to use". */
+        const val SYSTEM_ENGINE = "system"
+
+        /**
+         * Supertonic TTS registers itself as an Android speech engine. When it
+         * is installed it narrates automatically, until another engine is
+         * chosen in the voice picker.
+         */
+        const val SUPERTONIC_PACKAGE = "com.brahmadeo.supertonic.tts"
+
+        /** Short gender marker inside a voice name, e.g. Supertonic's `F3`/`M1`. */
+        private val VOICE_TOKEN = Regex("""(?<![a-z0-9])([fm])(\d{1,2})(?![a-z0-9])""")
     }
 }

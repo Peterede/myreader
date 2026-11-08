@@ -5,6 +5,7 @@ import android.content.Intent
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
@@ -18,6 +19,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import java.util.Locale
 
 /** Gender of an installed voice, inferred from the engine's voice name. */
@@ -44,6 +47,16 @@ data class VoiceOption(
     val label: String,
     /** True for voices synthesised by the engine's server; needs a connection. */
     val online: Boolean = false,
+)
+
+/** A character speaking in the book, and the voice reading their lines. */
+data class CastMember(
+    /** The name as it appears in the book. */
+    val name: String,
+    /** Engine voice name, or null when no voice could be assigned. */
+    val voiceName: String?,
+    /** Number of quoted lines, used to rank the cast. */
+    val lineCount: Int = 0,
 )
 
 /**
@@ -85,6 +98,16 @@ class Player(context: Context, private val store: BookStore) {
         val enginePackage: String? = null,
         /** Speech engines installed on the device. */
         val engines: List<EngineOption> = emptyList(),
+        /** True when each character speaks in their own voice. */
+        val multiVoice: Boolean = false,
+        /** Characters detected in the book, with their assigned voices. */
+        val cast: List<CastMember> = emptyList(),
+        /**
+         * Changes whenever the spoken layout does (a book opens, multi-voice
+         * is toggled, a line is reattributed), so the reader can refresh the
+         * speakers it shows against each line.
+         */
+        val narrationRevision: Int = 0,
     )
 
     private val appContext = context.applicationContext
@@ -103,9 +126,13 @@ class Player(context: Context, private val store: BookStore) {
     private var wakeLock: PowerManager.WakeLock? = null
 
     private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private val json = Json { ignoreUnknownKeys = true }
 
     private val _state = MutableStateFlow(
-        PlayerState(voiceName = prefs.getString(KEY_VOICE, null))
+        PlayerState(
+            voiceName = prefs.getString(KEY_VOICE, null),
+            multiVoice = prefs.getBoolean(KEY_MULTI_VOICE, false),
+        )
     )
     val state: StateFlow<PlayerState> = _state.asStateFlow()
 
@@ -119,6 +146,23 @@ class Player(context: Context, private val store: BookStore) {
 
     /** Per chapter: true where a sentence begins a new paragraph. */
     private var sentenceStartsParagraph: List<BooleanArray> = emptyList()
+
+    /** Characters found while analysing the book's dialogue. */
+    private var detectedCast: List<DialogueSpeaker> = emptyList()
+
+    /** The book laid out for multi-voice narration, and for a single narrator. */
+    private var dialogueParts: List<List<SpeechPart>> = emptyList()
+    private var plainParts: List<List<SpeechPart>> = emptyList()
+
+    /** The analysed dialogue, before the reader's speaker corrections. */
+    private var analyzedParts: List<List<SpeechPart>> = emptyList()
+
+    /** Reader corrections, keyed "chapter:sentence". */
+    private var speakerOverrides: Map<String, String> = emptyMap()
+
+    /** The layout currently being spoken, per chapter. */
+    private var spoken: List<SpokenChapter> = emptyList()
+
     private var currentUtterance: String? = null
     private var focusRequest: AudioFocusRequest? = null
     private val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f)
@@ -139,6 +183,24 @@ class Player(context: Context, private val store: BookStore) {
 
     /** A chunk planned for a chapter, ready to be spoken. */
     private data class Planned(val chapter: Int, val chunk: SpeechChunk)
+
+    /**
+     * A chapter laid out as the pieces the engine will speak, in order. A part
+     * is a sentence, or a slice of one when narration and dialogue share it.
+     */
+    private class SpokenChapter(parts: List<SpeechPart>) {
+        val texts: List<String> = parts.map { it.text }
+        val speakers: Array<String?> = parts.map { it.speaker }.toTypedArray()
+        val startsParagraph: BooleanArray = parts.map { it.startsParagraph }.toBooleanArray()
+        val sentences: IntArray = parts.map { it.sentence }.toIntArray()
+        val size: Int get() = texts.size
+
+        /** Index of the first piece in [sentence] or a later one. */
+        fun firstPartAtOrAfter(sentence: Int): Int {
+            val index = sentences.indexOfFirst { it >= sentence }
+            return if (index < 0) size else index
+        }
+    }
 
     /** Utterances the engine still has to play, the one being spoken first. */
     private val utteranceQueue = ArrayDeque<Utterance>()
@@ -162,6 +224,7 @@ class Player(context: Context, private val store: BookStore) {
         }
         sentences = paragraphs.map { chapter -> chapter.flatten() }
         sentenceStartsParagraph = paragraphs.map { chapter -> paragraphStarts(chapter) }
+        layOutNarration()
         val ci = loaded.meta.chapterIndex.coerceIn(0, loaded.chapters.lastIndex)
         val si = loaded.meta.sentenceIndex.coerceIn(
             0,
@@ -180,9 +243,53 @@ class Player(context: Context, private val store: BookStore) {
             voices = _state.value.voices,
             enginePackage = _state.value.enginePackage,
             engines = _state.value.engines,
+            multiVoice = _state.value.multiVoice,
+            narrationRevision = _state.value.narrationRevision + 1,
         )
         ensureTts()
         applySpeechSetup()
+    }
+
+    /**
+     * Works out who speaks each sentence and prepares both layouts: the plain
+     * one used for single-voice narration and the split one used when every
+     * character has their own voice.
+     */
+    private fun layOutNarration() {
+        val analysis = sentences.mapIndexed { index, chapterSentences ->
+            DialogueAnalyzer.analyze(
+                chapterSentences,
+                sentenceStartsParagraph.getOrNull(index),
+            )
+        }
+        detectedCast = analysis
+            .flatMap { it.speakers }
+            .groupBy { it.name }
+            .map { (name, lines) -> DialogueSpeaker(name, lines.sumOf { it.lineCount }) }
+            .sortedByDescending { it.lineCount }
+        analyzedParts = analysis.map { it.parts }
+        speakerOverrides = book?.meta?.id?.let { loadSpeakerOverrides(it) }.orEmpty()
+        dialogueParts = analyzedParts.mapIndexed { chapter, parts ->
+            withOverrides(chapter, parts)
+        }
+        plainParts = sentences.mapIndexed { index, chapterSentences ->
+            val starts = sentenceStartsParagraph.getOrNull(index)
+            chapterSentences.mapIndexed { sentence, text ->
+                SpeechPart(
+                    sentence = sentence,
+                    speaker = null,
+                    text = text,
+                    startsParagraph = starts?.getOrNull(sentence) == true,
+                )
+            }
+        }
+        applyParts()
+    }
+
+    /** Selects the layout matching the current multi-voice setting. */
+    private fun applyParts() {
+        val source = if (_state.value.multiVoice) dialogueParts else plainParts
+        spoken = source.map { SpokenChapter(it) }
     }
 
     fun play() {
@@ -223,12 +330,19 @@ class Player(context: Context, private val store: BookStore) {
         book = null
         sentences = emptyList()
         sentenceStartsParagraph = emptyList()
+        detectedCast = emptyList()
+        dialogueParts = emptyList()
+        plainParts = emptyList()
+        analyzedParts = emptyList()
+        speakerOverrides = emptyMap()
+        spoken = emptyList()
         _state.value = PlayerState(
             speed = _state.value.speed,
             voiceName = _state.value.voiceName,
             voices = _state.value.voices,
             enginePackage = _state.value.enginePackage,
             engines = _state.value.engines,
+            multiVoice = _state.value.multiVoice,
         )
     }
 
@@ -326,6 +440,7 @@ class Player(context: Context, private val store: BookStore) {
             if (name == null) remove(KEY_VOICE) else putString(KEY_VOICE, name)
         }.apply()
         _state.update { it.copy(voiceName = name) }
+        refreshCast()
 
         val tts = tts ?: return
         val voice = name?.let { n -> availableVoices().firstOrNull { it.name == n } }
@@ -338,6 +453,185 @@ class Player(context: Context, private val store: BookStore) {
 
         // Restart the current chunk so the change is heard immediately.
         if (_state.value.isPlaying) restartSpeech()
+    }
+
+    /**
+     * Turns multi-voice narration on or off. With it on, quoted dialogue is
+     * read by each character's own voice and narration by the narrator's.
+     */
+    fun setMultiVoice(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_MULTI_VOICE, enabled).apply()
+        if (_state.value.multiVoice == enabled) return
+        _state.update {
+            it.copy(multiVoice = enabled, narrationRevision = it.narrationRevision + 1)
+        }
+        applyParts()
+        refreshCast()
+        if (_state.value.isPlaying) restartSpeech()
+    }
+
+    /**
+     * Assigns [voiceName] to [name] in this book, or null to let the player
+     * choose a voice for that character automatically.
+     */
+    fun setCastVoice(name: String, voiceName: String?) {
+        val bookId = book?.meta?.id ?: return
+        val saved = loadCastVoices(bookId).toMutableMap()
+        if (voiceName == null) saved.remove(name) else saved[name] = voiceName
+        prefs.edit()
+            .putString(KEY_CAST_PREFIX + bookId, json.encodeToString(saved.toMap()))
+            .apply()
+        refreshCast()
+        if (_state.value.isPlaying) restartSpeech()
+    }
+
+    /**
+     * Forces [speaker] to read every line of one sentence; null makes the
+     * narrator read it. The correction is stored for this book.
+     */
+    fun setSentenceSpeaker(chapter: Int, sentence: Int, speaker: String?) {
+        saveSpeakerOverride(overrideKey(chapter, sentence), speaker ?: NARRATOR_OVERRIDE)
+    }
+
+    /** Drops the correction for one sentence, restoring the detected speaker. */
+    fun clearSentenceSpeaker(chapter: Int, sentence: Int) {
+        saveSpeakerOverride(overrideKey(chapter, sentence), null)
+    }
+
+    /** True when the reader has set who speaks this sentence. */
+    fun hasSpeakerOverride(chapter: Int, sentence: Int): Boolean =
+        speakerOverrides.containsKey(overrideKey(chapter, sentence))
+
+    /** True when the reader forced the narrator onto this sentence. */
+    fun isNarratorOverride(chapter: Int, sentence: Int): Boolean =
+        speakerOverrides[overrideKey(chapter, sentence)] == NARRATOR_OVERRIDE
+
+    /**
+     * The character reading each sentence of [chapterIndex], or null for the
+     * narrator. The first dialogue piece of a sentence is what shows.
+     */
+    fun speakersFor(chapterIndex: Int): List<String?> {
+        val chapter = spoken.getOrNull(chapterIndex) ?: return emptyList()
+        val result = arrayOfNulls<String>(sentences.getOrNull(chapterIndex)?.size ?: 0)
+        for (part in chapter.texts.indices) {
+            val speaker = chapter.speakers[part] ?: continue
+            val sentence = chapter.sentences[part]
+            if (sentence in result.indices && result[sentence] == null) result[sentence] = speaker
+        }
+        return result.toList()
+    }
+
+    private fun overrideKey(chapter: Int, sentence: Int): String = "$chapter:$sentence"
+
+    private fun saveSpeakerOverride(key: String, speaker: String?) {
+        val bookId = book?.meta?.id ?: return
+        val saved = loadSpeakerOverrides(bookId).toMutableMap()
+        if (speaker == null) saved.remove(key) else saved[key] = speaker
+        prefs.edit()
+            .putString(KEY_SPEAKER_PREFIX + bookId, json.encodeToString(saved.toMap()))
+            .apply()
+        speakerOverrides = saved
+        dialogueParts = analyzedParts.mapIndexed { chapter, parts ->
+            withOverrides(chapter, parts)
+        }
+        applyParts()
+        _state.update { it.copy(narrationRevision = it.narrationRevision + 1) }
+        if (_state.value.isPlaying) restartSpeech()
+    }
+
+    /** Reapplies the reader's corrections over one chapter's analysed parts. */
+    private fun withOverrides(chapter: Int, parts: List<SpeechPart>): List<SpeechPart> {
+        if (speakerOverrides.isEmpty()) return parts
+        val dialogueSentences = parts.filter { it.isDialogue }
+            .mapTo(HashSet()) { it.sentence }
+        return parts.map { part ->
+            val choice = speakerOverrides[overrideKey(chapter, part.sentence)]
+                ?: return@map part
+            // A correction is about who said the line, so the narration tag
+            // around a quote keeps the narrator's voice.
+            if (!part.isDialogue && part.sentence in dialogueSentences) return@map part
+            part.copy(speaker = if (choice == NARRATOR_OVERRIDE) null else choice)
+        }
+    }
+
+    private fun loadSpeakerOverrides(bookId: String): Map<String, String> =
+        prefs.getString(KEY_SPEAKER_PREFIX + bookId, null)
+            ?.let { runCatching { json.decodeFromString<Map<String, String>>(it) }.getOrNull() }
+            .orEmpty()
+
+    /** Recomputes the cast's voices from the saved choices and the live list. */
+    private fun refreshCast() {
+        if (detectedCast.isEmpty()) {
+            _state.update { it.copy(cast = emptyList()) }
+            return
+        }
+        val voices = _state.value.voices
+        val saved = book?.meta?.id?.let { loadCastVoices(it) }.orEmpty()
+        val auto = autoVoices(detectedCast, voices, _state.value.voiceName)
+        _state.update { state ->
+            state.copy(
+                cast = detectedCast.map { member ->
+                    val chosen = saved[member.name]
+                        ?.takeIf { name -> voices.any { it.name == name } }
+                    CastMember(member.name, chosen ?: auto[member.name], member.lineCount)
+                },
+            )
+        }
+    }
+
+    /**
+     * Spreads the installed voices over the cast, keeping the narrator's voice
+     * for narration and alternating genders so two characters rarely sound the
+     * same. The result is deterministic, so a book sounds the same each time.
+     */
+    private fun autoVoices(
+        cast: List<DialogueSpeaker>,
+        voices: List<VoiceOption>,
+        narrator: String?,
+    ): Map<String, String> {
+        val usable = voices.filter { it.name != narrator }
+            .ifEmpty { voices }
+            .sortedBy { it.online }
+        if (usable.isEmpty()) return emptyMap()
+        val female = usable.filter { it.gender == VoiceGender.FEMALE }
+        val male = usable.filter { it.gender == VoiceGender.MALE }
+        val other = usable.filter { it.gender == VoiceGender.UNKNOWN }
+        val ordered = buildList {
+            for (index in 0 until maxOf(female.size, male.size)) {
+                female.getOrNull(index)?.let { add(it.name) }
+                male.getOrNull(index)?.let { add(it.name) }
+            }
+            other.forEach { add(it.name) }
+        }
+        return cast.mapIndexed { index, member ->
+            member.name to ordered[index % ordered.size]
+        }.toMap()
+    }
+
+    private fun loadCastVoices(bookId: String): Map<String, String> =
+        prefs.getString(KEY_CAST_PREFIX + bookId, null)
+            ?.let { runCatching { json.decodeFromString<Map<String, String>>(it) }.getOrNull() }
+            .orEmpty()
+
+    /** The narrator's voice: the reader's pick, or the best installed one. */
+    private fun narratorVoiceName(): String? =
+        _state.value.voiceName
+            ?: recommendedVoice()?.name
+            ?: _state.value.voices.firstOrNull()?.name
+
+    /** The voice that should read [speaker]'s lines right now. */
+    private fun voiceFor(speaker: String?): String? {
+        if (!_state.value.multiVoice || speaker == null) return narratorVoiceName()
+        val member = _state.value.cast.firstOrNull { it.name == speaker }
+        return member?.voiceName ?: narratorVoiceName()
+    }
+
+    private fun selectEngineVoice(name: String?) {
+        val tts = tts ?: return
+        val voice = name
+            ?.let { wanted -> availableVoices().firstOrNull { it.name == wanted } }
+            ?: return
+        runCatching { tts.voice = voice }
     }
 
     fun sentencesFor(chapterIndex: Int): List<String> =
@@ -456,6 +750,7 @@ class Player(context: Context, private val store: BookStore) {
         applyVoice()
         tts?.setSpeechRate(_state.value.speed)
         refreshVoices()
+        refreshCast()
         _state.update { it.copy(engines = installedEngines()) }
     }
 
@@ -706,11 +1001,19 @@ class Player(context: Context, private val store: BookStore) {
             size = chunk.sentenceCount,
             offsets = chunk.sentenceOffsets,
         )
+        val params = Bundle()
+        val voiceName = voiceFor(chunk.speaker)
+        if (voiceName != null) {
+            params.putString(VOICE_PARAM, voiceName)
+            // Engines that ignore the per-utterance parameter still pick up the
+            // voice set here, because they synthesise queued text in order.
+            selectEngineVoice(voiceName)
+        }
         val queued = runCatching {
             tts.speak(
                 chunk.text,
                 if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD,
-                null,
+                params,
                 utterance.id,
             ) == TextToSpeech.SUCCESS
         }.getOrDefault(false)
@@ -720,11 +1023,15 @@ class Player(context: Context, private val store: BookStore) {
         utteranceQueue.addLast(utterance)
         if (flush) {
             currentUtterance = utterance.id
-            if (chapter != _state.value.chapterIndex || chunk.start != _state.value.sentenceIndex) {
+            val startSentence = spoken.getOrNull(chapter)
+                ?.sentences?.getOrNull(chunk.start) ?: 0
+            if (chapter != _state.value.chapterIndex ||
+                startSentence != _state.value.sentenceIndex
+            ) {
                 _state.update {
                     it.copy(
                         chapterIndex = chapter,
-                        sentenceIndex = chunk.start,
+                        sentenceIndex = startSentence,
                         sentenceCount = sentences[chapter].size,
                     )
                 }
@@ -738,15 +1045,16 @@ class Player(context: Context, private val store: BookStore) {
         val tail = utteranceQueue.lastOrNull()
         if (tail == null) {
             val st = _state.value
-            val size = sentences.getOrNull(st.chapterIndex).orEmpty().size
-            return if (st.sentenceIndex < size) {
-                st.chapterIndex to st.sentenceIndex
+            val chapter = spoken.getOrNull(st.chapterIndex) ?: return null
+            val at = chapter.firstPartAtOrAfter(st.sentenceIndex)
+            return if (at < chapter.size) {
+                st.chapterIndex to at
             } else {
                 nextChapterPosition(st.chapterIndex)
             }
         }
         val after = tail.start + tail.size
-        return if (after < sentences.getOrNull(tail.chapter).orEmpty().size) {
+        return if (after < (spoken.getOrNull(tail.chapter)?.size ?: 0)) {
             tail.chapter to after
         } else {
             nextChapterPosition(tail.chapter)
@@ -765,17 +1073,18 @@ class Player(context: Context, private val store: BookStore) {
         var ch = chapter
         var at = from
         while (true) {
-            val sents = sentences.getOrNull(ch) ?: return null
-            if (at >= sents.size) {
+            val chapterParts = spoken.getOrNull(ch) ?: return null
+            if (at >= chapterParts.size) {
                 val next = nextChapterPosition(ch) ?: return null
                 ch = next.first
                 at = next.second
                 continue
             }
             val chunk = SpeechChunker.plan(
-                sents,
-                sentenceStartsParagraph.getOrNull(ch),
+                chapterParts.texts,
+                chapterParts.startsParagraph,
                 from = at,
+                speakers = chapterParts.speakers,
             )
             if (chunk.text.isNotBlank()) return Planned(ch, chunk)
             at = chunk.start + chunk.sentenceCount
@@ -789,7 +1098,7 @@ class Player(context: Context, private val store: BookStore) {
      */
     private fun beatBefore(chapter: Int, from: Int): Long {
         if (from == 0 && chapter > 0) return CHAPTER_PAUSE_MS
-        val startsParagraph = sentenceStartsParagraph.getOrNull(chapter) ?: return 0
+        val startsParagraph = spoken.getOrNull(chapter)?.startsParagraph ?: return 0
         return if (startsParagraph.getOrNull(from) == true) PARAGRAPH_PAUSE_MS else 0
     }
 
@@ -833,14 +1142,17 @@ class Player(context: Context, private val store: BookStore) {
     private fun onRangeStarted(id: String, start: Int) {
         val utterance = utteranceById[id] ?: return
         if (!_state.value.isPlaying) return
-        var sentence = 0
+        var part = 0
         for (i in utterance.offsets.indices) {
-            if (utterance.offsets[i] <= start) sentence = i else break
+            if (utterance.offsets[i] <= start) part = i else break
         }
+        val sentence = spoken.getOrNull(utterance.chapter)
+            ?.sentences?.getOrNull(utterance.start + part)
+            ?: return
         _state.update { st ->
             st.copy(
                 chapterIndex = utterance.chapter,
-                sentenceIndex = utterance.start + sentence,
+                sentenceIndex = sentence,
                 sentenceCount = sentences.getOrNull(utterance.chapter)?.size ?: st.sentenceCount,
             )
         }
@@ -854,7 +1166,8 @@ class Player(context: Context, private val store: BookStore) {
         val utterance = utteranceById.remove(id) ?: return
         if (utteranceQueue.firstOrNull()?.id == id) utteranceQueue.removeFirst()
 
-        val chapterSize = sentences.getOrNull(utterance.chapter).orEmpty().size
+        val chapterParts = spoken.getOrNull(utterance.chapter)
+        val chapterSize = chapterParts?.size ?: 0
         val end = utterance.start + utterance.size
         val following = if (end >= chapterSize) nextChapterPosition(utterance.chapter) else null
         _state.update { st ->
@@ -866,7 +1179,8 @@ class Player(context: Context, private val store: BookStore) {
                     finished = false,
                 )
             } else {
-                st.copy(sentenceIndex = end.coerceAtMost(chapterSize))
+                val next = chapterParts?.sentences?.getOrNull(end)
+                st.copy(sentenceIndex = next ?: st.sentenceIndex)
             }
         }
         persist()
@@ -1001,6 +1315,22 @@ class Player(context: Context, private val store: BookStore) {
         const val PREFS = "reader_settings"
         const val KEY_VOICE = "voice_name"
         const val KEY_ENGINE = "engine_package"
+        const val KEY_MULTI_VOICE = "multi_voice"
+
+        /** Per book: the reader's voice choices for the cast, as a JSON map. */
+        const val KEY_CAST_PREFIX = "cast_voices_"
+
+        /** Per book: the reader's line corrections, as a JSON map. */
+        const val KEY_SPEAKER_PREFIX = "sentence_speakers_"
+
+        /** Stored correction meaning "the narrator reads this sentence". */
+        const val NARRATOR_OVERRIDE = "*narrator*"
+
+        /**
+         * The engine reads the voice to use from this entry of the speak()
+         * parameters. Not a public SDK constant, so it is spelled out here.
+         */
+        const val VOICE_PARAM = "voiceName"
 
         /** Stored engine preference meaning "whatever Android is set to use". */
         const val SYSTEM_ENGINE = "system"

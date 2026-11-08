@@ -16,6 +16,8 @@ internal data class SpeechChunk(
      * short beat of silence there, the way a narrator does.
      */
     val endsParagraph: Boolean,
+    /** Character reading this chunk, or null for the narrator. */
+    val speaker: String? = null,
 )
 
 /**
@@ -44,13 +46,18 @@ internal object SpeechChunker {
      *
      * @param startsParagraph per sentence: true when that sentence opens a new
      *   paragraph (null when the structure is unknown).
+     * @param speakers per sentence: the character reading it, or null for the
+     *   narrator. A chunk never spans two voices, since the engine switches
+     *   voice only at utterance boundaries.
      */
     fun plan(
         sentences: List<String>,
         startsParagraph: BooleanArray?,
         from: Int,
+        speakers: Array<String?>? = null,
     ): SpeechChunk {
         require(from in sentences.indices) { "start sentence $from out of range" }
+        val speaker = speakers?.getOrNull(from)
 
         val text = StringBuilder()
         val offsets = ArrayList<Int>()
@@ -58,6 +65,7 @@ internal object SpeechChunker {
         var idx = from
         while (idx < sentences.size && count < MAX_SENTENCES) {
             if (count > 0 && startsParagraph?.getOrNull(idx) == true) break
+            if (count > 0 && speakers != null && speakers.getOrNull(idx) != speaker) break
 
             val spoken = SpeechText.forSpeech(sentences[idx])
             val added = if (count > 0) 1 + spoken.length else spoken.length
@@ -85,6 +93,7 @@ internal object SpeechChunker {
             text = text.toString(),
             sentenceOffsets = offsets.toIntArray(),
             endsParagraph = endsParagraph,
+            speaker = speaker,
         )
     }
 }

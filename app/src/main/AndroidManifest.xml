@@ -6,8 +6,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Lets the reader see installed speech engines (e.g. Supertonic) so one
-         can be chosen instead of only the device default. -->
+    <!-- Lets the reader see installed speech engines (e.g. Maise or Supertonic)
+         so one can be chosen instead of only the device default. -->
     <queries>
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE" />

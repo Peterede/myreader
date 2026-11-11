@@ -28,7 +28,7 @@ enum class VoiceGender { MALE, FEMALE, UNKNOWN }
 
 /**
  * A speech engine installed on the device: any app that registers an Android
- * text-to-speech service, such as Google's engine or Supertonic.
+ * text-to-speech service, such as Google's engine, Maise or Supertonic.
  */
 data class EngineOption(
     val packageName: String,
@@ -706,14 +706,15 @@ class Player(context: Context, private val store: BookStore) {
 
     /**
      * The engine to speak with: the stored choice while it is still installed,
-     * otherwise Supertonic if it is installed, otherwise the system default.
+     * otherwise the first preferred engine that is installed, otherwise the
+     * system default.
      */
     private fun resolveEnginePackage(): String? {
         if (forceDefaultEngine) return null
         val installed = installedEngines().map { it.packageName }
         return when (val pref = prefs.getString(KEY_ENGINE, null)) {
             SYSTEM_ENGINE -> null
-            null -> SUPERTONIC_PACKAGE.takeIf { it in installed }
+            null -> PREFERRED_ENGINES.firstOrNull { it in installed }
             else -> pref.takeIf { it in installed }
         }
     }
@@ -783,7 +784,7 @@ class Player(context: Context, private val store: BookStore) {
         val voice = voices.firstOrNull { it.name == stored }
         val bookLocale = book?.meta?.language?.let { languageOf(it) }
         val mismatched = voice != null && bookLocale != null &&
-            !sameLanguage(voice.locale, bookLocale)
+            !sameLanguage(spokenLocale(voice), bookLocale)
         if (voice == null || mismatched) {
             prefs.edit().remove(KEY_VOICE).apply()
             _state.update { it.copy(voiceName = null) }
@@ -806,11 +807,11 @@ class Player(context: Context, private val store: BookStore) {
         val deviceLocale = Locale.getDefault()
         val bookLocale = book?.meta?.language?.let { languageOf(it) }
         val candidates = availableVoices()
-            .filter { sameLanguage(it.locale, bookLocale ?: deviceLocale) }
+            .filter { sameLanguage(spokenLocale(it), bookLocale ?: deviceLocale) }
             .filter { !it.isNetworkConnectionRequired }
         return candidates.sortedWith(
             compareByDescending<Voice> {
-                localeScore(it.locale, bookLocale?.country.orEmpty(), deviceLocale.country)
+                localeScore(spokenLocale(it), bookLocale?.country.orEmpty(), deviceLocale.country)
             }
                 .thenByDescending { it.quality }
                 .thenBy { it.name },
@@ -833,6 +834,24 @@ class Player(context: Context, private val store: BookStore) {
 
     private fun availableVoices(): List<Voice> =
         runCatching { tts?.voices }.getOrNull().orEmpty().toList()
+
+    /**
+     * The Maise voice id split into the language it was trained on and a
+     * readable name. Other engines' ids do not end in `-kokoro`, so they do
+     * not match.
+     */
+    private fun maiseVoice(voice: Voice): MaiseVoices.Parsed? =
+        MaiseVoices.parse(voice.name)
+
+    /**
+     * The language a voice really speaks. Maise reports every voice as en-US
+     * and encodes the real language only in its id, so a German or British
+     * voice would not match the book's language without this.
+     */
+    private fun spokenLocale(voice: Voice): Locale {
+        val tag = maiseVoice(voice)?.localeTag ?: return voice.locale
+        return languageOf(tag) ?: voice.locale
+    }
 
     /**
      * Android does not expose a voice's gender, but engines name their voices
@@ -883,11 +902,11 @@ class Player(context: Context, private val store: BookStore) {
             return
         }
         val target = book?.meta?.language?.let { languageOf(it) } ?: Locale.getDefault()
-        val matching = all.filter { sameLanguage(it.locale, target) }
+        val matching = all.filter { sameLanguage(spokenLocale(it), target) }
         val usable = (if (matching.isNotEmpty()) matching else all)
             .sortedWith(
                 compareByDescending<Voice> { it.quality }
-                    .thenBy { it.locale.toLanguageTag() }
+                    .thenBy { spokenLocale(it).toLanguageTag() }
                     .thenBy { it.name },
             )
 
@@ -895,16 +914,18 @@ class Player(context: Context, private val store: BookStore) {
         var male = 0
         val options = usable.map { voice ->
             val gender = genderOf(voice)
-            val accent = accentOf(voice.locale)
+            val accent = accentOf(spokenLocale(voice))
+            val maise = maiseVoice(voice)
             // Keep the engine's own numbering (Supertonic's F3 stays "Female 3")
             // and count only the voices that do not carry one.
             if (gender == VoiceGender.FEMALE) female++
             if (gender == VoiceGender.MALE) male++
             val engineNumber = nameNumber(voice.name.lowercase(Locale.ROOT))?.second
-            val base = when (gender) {
-                VoiceGender.FEMALE -> "Female ${engineNumber ?: female}"
-                VoiceGender.MALE -> "Male ${engineNumber ?: male}"
-                VoiceGender.UNKNOWN -> voice.name
+            val base = when {
+                maise != null -> maise.name
+                gender == VoiceGender.FEMALE -> "Female ${engineNumber ?: female}"
+                gender == VoiceGender.MALE -> "Male ${engineNumber ?: male}"
+                else -> voice.name
             }
             val parts = listOfNotNull(
                 base,
@@ -1336,13 +1357,41 @@ class Player(context: Context, private val store: BookStore) {
         const val SYSTEM_ENGINE = "system"
 
         /**
-         * Supertonic TTS registers itself as an Android speech engine. When it
-         * is installed it narrates automatically, until another engine is
-         * chosen in the voice picker.
+         * Maise (com.danemadsen.maise) and Supertonic register themselves as
+         * Android speech engines. The first installed narrates automatically,
+         * until another engine is chosen in the voice picker.
          */
+        val PREFERRED_ENGINES = listOf(MAISE_PACKAGE, SUPERTONIC_PACKAGE)
+
+        const val MAISE_PACKAGE = "com.danemadsen.maise"
         const val SUPERTONIC_PACKAGE = "com.brahmadeo.supertonic.tts"
 
         /** Short gender marker inside a voice name, e.g. Supertonic's `F3`/`M1`. */
         private val VOICE_TOKEN = Regex("""(?<![a-z0-9])([fm])(\d{1,2})(?![a-z0-9])""")
     }
+}
+
+/**
+ * Maise voice ids look like `en-GB-alice-kokoro` or `el-GR-alpha-f-kokoro`: the
+ * language the voice was trained on, its name, and the model, joined by dashes.
+ * The engine reports every one of them as en-US, so the id is the only place
+ * the real language and a name a reader can recognise appear.
+ */
+internal object MaiseVoices {
+
+    /** A parsed voice id: its language tag and a human-readable voice name. */
+    data class Parsed(val localeTag: String, val name: String)
+
+    fun parse(id: String): Parsed? {
+        val match = ID.matchEntire(id) ?: return null
+        val name = match.groupValues[2]
+            .split('-')
+            .filter { it.isNotEmpty() }
+            .joinToString(" ") { part -> part.replaceFirstChar { it.uppercaseChar() } }
+        return Parsed(match.groupValues[1], name)
+    }
+
+    private val ID = Regex(
+        """([A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,4})?)-([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)-kokoro"""
+    )
 }

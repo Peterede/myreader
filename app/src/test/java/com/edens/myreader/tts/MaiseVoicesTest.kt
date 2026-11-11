@@ -29,5 +29,6 @@ class MaiseVoicesTest {
         assertNull(MaiseVoices.parse("en-us-x-sfg#female_1-local"))
         assertNull(MaiseVoices.parse("en-supertonic-F3"))
         assertNull(MaiseVoices.parse("en-US-heart"))
+        assertNull(MaiseVoices.parse("Heart (Kokoro)"))
     }
 }

@@ -28,7 +28,8 @@ enum class VoiceGender { MALE, FEMALE, UNKNOWN }
 
 /**
  * A speech engine installed on the device: any app that registers an Android
- * text-to-speech service, such as Google's engine, Maise or Supertonic.
+ * text-to-speech service, such as Google's engine, Maise, VoxSherpa or
+ * Supertonic.
  */
 data class EngineOption(
     val packageName: String,
@@ -1357,13 +1358,16 @@ class Player(context: Context, private val store: BookStore) {
         const val SYSTEM_ENGINE = "system"
 
         /**
-         * Maise (com.danemadsen.maise) and Supertonic register themselves as
-         * Android speech engines. The first installed narrates automatically,
-         * until another engine is chosen in the voice picker.
+         * Maise (com.danemadsen.maise), VoxSherpa (com.CodeBySonu.VoxSherpa)
+         * and Supertonic register themselves as Android speech engines. The
+         * first installed narrates automatically, until another engine is
+         * chosen in the voice picker.
          */
-        val PREFERRED_ENGINES = listOf(MAISE_PACKAGE, SUPERTONIC_PACKAGE)
+        val PREFERRED_ENGINES =
+            listOf(MAISE_PACKAGE, VOXSHERPA_PACKAGE, SUPERTONIC_PACKAGE)
 
         const val MAISE_PACKAGE = "com.danemadsen.maise"
+        const val VOXSHERPA_PACKAGE = "com.CodeBySonu.VoxSherpa"
         const val SUPERTONIC_PACKAGE = "com.brahmadeo.supertonic.tts"
 
         /** Short gender marker inside a voice name, e.g. Supertonic's `F3`/`M1`. */
